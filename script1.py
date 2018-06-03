@@ -60,7 +60,7 @@ class EncoderG(nn.Module):
         return torch.zeros(1, 1, self.embedding_size)
 
 class DecoderG(nn.Module):
-    def __init__(self, vocab_size, embedding_size, drop_out, max_length=MaxLength):
+    def __init__(self, vocab_size, embedding_size, drop_out=0, max_length=MaxLength):
         super(DecoderG, self).__init__()
         self.vocab_size = vocab_size
         self.embedding_size = embedding_size
@@ -70,14 +70,24 @@ class DecoderG(nn.Module):
         self.embedding = nn.Embedding(self.vocab_size, self.embedding_size)
         self.attn = nn.Linear(embedding_size*2, self.max_length)
         self.attn_combine = nn.Linear(self.embedding_size*2, self.embedding_size)
-        self.gru = nn.GRU(self.embedding_size, self.embedding_size)
+        self.gru = nn.GRU(self.embedding_size, self.embedding_size, drop_out=self.drop_out)
         self.out = nn.Linear(self.embedding_size, self.vocab_size)
 
     def forward(self, hidden, word_in, encoder_outputs):
         embedded = self.embedding(word_in).view(1, 1, -1)
         attn_weights = F.softmax(self.attn(torch.cat((hidden[0], embedded[0]), dim=1)), dim=1)
         attn_applied = torch.bmm(attn_weights.unsqueeze(0), encoder_outputs.unsqueeze(0))
-        
+        output = self.attn_combine(torch.cat((embedded[0], attn_applied[0]), dim=1)).unsqueeze(0)
+        output = F.relu(output)
+        output, hidden = self.gru(output, hidden)
+        output = F.log_softmax(self.out(output[0]), dim=1)
+
+        return output, hidden, attn_weights
+
+    def initHidden(self):
+        return torch.zero(1, 1, self.embedding_size)
+
+
 
 
 
