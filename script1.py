@@ -6,7 +6,7 @@ import random
 
 
 
-############################# PREDEFINED #########################
+############################# PREDEFINED ################################
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 TrainSetDir = "./data/s_given_t_train.txt"
@@ -104,7 +104,7 @@ class EncoderG(nn.Module):
         return output, hidden
 
     def initHidden(self):
-        return torch.zeros(1, 1, self.embedding_size).to(device)
+        return torch.zeros(1, 1, self.embedding_size)#.to(device)
 
 class DecoderG(nn.Module):
     def __init__(self, vocab_size=VocabSize, embedding_size=EmbeddingSize, drop_out=0., max_length=MaxLength):
@@ -133,7 +133,7 @@ class DecoderG(nn.Module):
         return output, hidden, attn_weights
 
     def initHidden(self):
-        return torch.zero(1, 1, self.embedding_size).to(device)
+        return torch.zero(1, 1, self.embedding_size)#.to(device)
 
 def GenForward(encoder_G, decoder_G, input_tensor, max_length=MaxLength):
     '''Using Generator to generate answer given an input_tensor'''
@@ -171,7 +171,7 @@ def GenForward(encoder_G, decoder_G, input_tensor, max_length=MaxLength):
 # input_tensor, target_tensor = tensorFromPair(random_pair)
 # Gen_output = GenForward(Gen_encoder,Gen_decoder,input_tensor)
 #
-# print("A test of Generator: \nsource: {}\ntarget: {}\ngenerated: {}"
+# print("A test of Generator: \n<source>: {}\n<target>: {}\n<generated>: {}"
 #       .format(index2sentence(random_pair[0], index2word),
 #               index2sentence(random_pair[1], index2word),
 #               index2sentence(Gen_output, index2word)))
@@ -271,22 +271,56 @@ def pretrainG(encoder, decoder, num_iter=10000, print_loss_every=1000, max_lengt
 
     return 0
 
-## pretrain Generator ##
-Gen_encoder = EncoderG().to(device)
-Gen_decoder = DecoderG().to(device)
+########################### pretrain Generator #########################################
+# Gen_encoder = EncoderG().to(device)
+# Gen_decoder = DecoderG().to(device)
+#
+# try:
+#     Gen_encoder.load_state_dict(torch.load("./ModelParams/Gen_encoder_params.pkl"))
+#     Gen_decoder.load_state_dict(torch.load("./ModelParams/Gen_decoder_params.pkl"))
+#     print("Model parameters loaded.")
+# except FileNotFoundError:
+#     print("Model parameters loading failed.")
+
+# pretrainG(Gen_encoder, Gen_decoder, num_iter=10000, print_loss_every=1000)
+#
+# torch.save(Gen_encoder.state_dict(), "./ModelParams/Gen_encoder_params.pkl")
+# torch.save(Gen_decoder.state_dict(), "./ModelParams/Gen_decoder_params.pkl")
+#########################################################################################
+
+############################# 测试训练后的Generator ########################################################
+Gen_encoder = EncoderG()
+Gen_decoder = DecoderG()
 
 try:
-    Gen_encoder.load_state_dict(torch.load("./Param/Gen_encoder_params.pkl"))
-    Gen_decoder.load_state_dict(torch.load("./Param/Gen_decoder_params.pkl"))
+    Gen_encoder.load_state_dict(torch.load("./ModelParams/Gen_encoder_params.pkl"))
+    Gen_decoder.load_state_dict(torch.load("./ModelParams/Gen_decoder_params.pkl"))
     print("Model parameters loaded.")
 except FileNotFoundError:
     print("Model parameters loading failed.")
 
-pretrainG(Gen_encoder, Gen_decoder, num_iter=200, print_loss_every=50)
+train_pairs = [tensorFromPair(random.choice(TrainSet)) for i in range(5)]
+print("----------------Evaluation on training set: --------------------- ")
+for i in range(5):
+    Gen_output = GenForward(Gen_encoder,Gen_decoder,train_pairs[i][0])
+    print("--------------------------------------------------------")
+    print("<source>: {}\n<target>: {}\n<generated>: {}"
+      .format(index2sentence(train_pairs[i][0].squeeze().numpy(), index2word),
+              index2sentence(train_pairs[i][1].squeeze().numpy(), index2word),
+              index2sentence(Gen_output, index2word)))
 
-torch.save(Gen_encoder.state_dict(), "./Param/Gen_encoder_params.pkl")
-torch.save(Gen_decoder.state_dict(), "./Param/Gen_decoder_params.pkl")
+test_pairs = [tensorFromPair(random.choice(TestSet)) for i in range(5)]
+print("----------------Evaluation on testing set: -----------------------")
+for i in range(5):
+    Gen_output = GenForward(Gen_encoder,Gen_decoder,test_pairs[i][0])
+    print("--------------------------------------------------------")
+    print("<source>: {}\n<target>: {}\n<generated>: {}"
+      .format(index2sentence(test_pairs[i][0].squeeze().numpy(), index2word),
+              index2sentence(test_pairs[i][1].squeeze().numpy(), index2word),
+              index2sentence(Gen_output, index2word)))
+#############################################################################################################
 
+###################### 模型保存 ####################################
 # # 保存和加载整个模型
 # torch.save(model_object, 'model.pkl')
 # model = torch.load('model.pkl')
@@ -294,7 +328,7 @@ torch.save(Gen_decoder.state_dict(), "./Param/Gen_decoder_params.pkl")
 # # 仅保存和加载模型参数(推荐使用)
 # torch.save(model_object.state_dict(), 'params.pkl')
 # model_object.load_state_dict(torch.load('params.pkl'))
-
+####################################################################
 
 
 
