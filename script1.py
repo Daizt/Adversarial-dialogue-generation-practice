@@ -190,25 +190,36 @@ class hierEncoder(nn.Module):
         self.linear1 = nn.Linear(self.embedding_size, 128)
         self.linear2 = nn.Linear(128, 2)
 
-    def forward(self, pair):
+    def forward(self, pair, to_device=False):
         # pair为对话 {x, y} 类型为torch.tensor()
-        # example: pair = torch.tensor([[3,2,11,12],[1,3,24,123,5]])
         x_length = pair[0].size(0)
         y_length = pair[1].size(0)
 
-        hidden = self.initHidden()
+        if to_device:
+            hidden = self.initHidden().to(device)
+        else:
+            hidden = self.initHidden()
+
         for i in range(x_length):
             embedded_x = self.embedding(pair[0][i]).view(1, 1, -1)
             _, hidden = self.gru1(embedded_x, hidden)
         hidden_x = hidden     # x句的编码结果
 
-        hidden = self.initHidden()
+        if to_device:
+            hidden = self.initHidden().to(device)
+        else:
+            hidden = self.initHidden()
+
         for i in range(y_length):
             embedded_y = self.embedding(pair[1][i]).view(1, 1, -1)
             _, hidden = self.gru1(embedded_y, hidden)
         hidden_y = hidden     # y句的编码结果
 
-        hidden = self.initHidden()
+        if to_device:
+            hidden = self.initHidden().to(device)
+        else:
+            hidden = self.initHidden()
+
         _, hidden = self.gru2(hidden_x, hidden)
         _, hidden = self.gru2(hidden_y, hidden)
         hidden_xy = hidden    # 得到{x，y}编码结果
@@ -318,10 +329,10 @@ def pretrainG(encoder, decoder, batch_size=128, max_length=MaxLength, learning_r
                                                           total_loss.item()/batch_size))
 
 
-def pretrainD(modelD, learning_rate=0.01, batch_size=128):
+def pretrainD(modelD, learning_rate=0.01, batch_size=128, to_device=True):
     # prepare data
-    pos_data = [tensorFromPair(random.choice(TrainSet)) for _ in range(batch_size)]
-    neg_data = [tensorFromPair(random.choice(GenSet)) for _ in range(batch_size)]
+    pos_data = [tensorFromPair(random.choice(TrainSet), to_device=to_device) for _ in range(batch_size)]
+    neg_data = [tensorFromPair(random.choice(GenSet), to_device=to_device) for _ in range(batch_size)]
 
     # define optimizer & criterion
     discOptimizer = optim.SGD(modelD.parameters(), lr=learning_rate)
@@ -330,8 +341,13 @@ def pretrainD(modelD, learning_rate=0.01, batch_size=128):
 
     # some predefined variable
     # 注意：规定 Discriminator 的输出概率的含义为 [positive_probability, negative_probability]
-    posTag = torch.tensor([0]).to(device)
-    negTag = torch.tensor([1]).to(device)
+    if to_device:
+        posTag = torch.tensor([0]).to(device)
+        negTag = torch.tensor([1]).to(device)
+    else:
+        posTag = torch.tensor([0])
+        negTag = torch.tensor([1])
+
     loss = 0
     start_time = time.time()
 
@@ -339,18 +355,18 @@ def pretrainD(modelD, learning_rate=0.01, batch_size=128):
         # choose positive or negative pair randomly
         pick_positive_data = True if random.random() < 0.5 else False
         if pick_positive_data:
-            output = modelD(pos_data[iter])
+            output = modelD(pos_data[iter],to_device=to_device)
             loss += criterion(output, posTag)
         else:
-            output = modelD(neg_data[iter])
+            output = modelD(neg_data[iter],to_device=to_device)
             loss += criterion(output, negTag)
 
     # BPTT & params updating
     loss.backward()
     discOptimizer.step()
 
-    print("Time consumed: {} Average loss: {:.2f} ".format(asMinutes(time.time()-start_time),
-                                                          loss.item()/batch_size))
+    print("Time consumed: {} Batch loss: {:.2f} ".format(asMinutes(time.time()-start_time),
+                                                          loss.item()))
 
 ########################### pretrain Generator #########################################
 # Gen_encoder = EncoderG().to(device)
@@ -395,7 +411,7 @@ def pretrainD(modelD, learning_rate=0.01, batch_size=128):
 # except FileNotFoundError:
 #     print("Model parameters loading failed.")
 #
-# train_pairs = [tensorFromPair(random.choice(TrainSet)) for i in range(5)]
+# train_pairs = [tensorFromPair(random.choice(TrainSet),to_device=False) for i in range(5)]
 # print("----------------Evaluation on training set: --------------------- ")
 # for i in range(5):
 #     Gen_output = GenForward(Gen_encoder,Gen_decoder,train_pairs[i][0])
@@ -405,7 +421,7 @@ def pretrainD(modelD, learning_rate=0.01, batch_size=128):
 #               index2sentence(train_pairs[i][1].squeeze().numpy(), index2word),
 #               index2sentence(Gen_output, index2word)))
 #
-# test_pairs = [tensorFromPair(random.choice(TestSet)) for i in range(5)]
+# test_pairs = [tensorFromPair(random.choice(TestSet),to_device=False) for i in range(5)]
 # print("----------------Evaluation on testing set: -----------------------")
 # for i in range(5):
 #     Gen_output = GenForward(Gen_encoder,Gen_decoder,test_pairs[i][0])
@@ -419,7 +435,7 @@ def pretrainD(modelD, learning_rate=0.01, batch_size=128):
 # with open("./data/generated_dialogue.txt", 'a', encoding='utf-8') as f:
 #     for i in range(1000):
 #         s = ''
-#         x, _ = tensorFromPair(random.choice(TrainSet))
+#         x, _ = tensorFromPair(random.choice(TrainSet),to_device=False)
 #         generated = GenForward(Gen_encoder, Gen_decoder, x)
 #         x = x.squeeze().numpy()
 #         # print("input: ",x)
@@ -456,7 +472,7 @@ def pretrainD(modelD, learning_rate=0.01, batch_size=128):
 #             Interrupt_Flag = True
 #
 # try:
-#     torch.save(Gen_encoder.state_dict(), "./ModelParams/Disc_params.pkl")
+#     torch.save(Discriminator.state_dict(), "./ModelParams/Disc_params.pkl")
 #     print("Model parameters saved successfully.")
 # except:
 #     print("Failed to save model parameters.")
@@ -472,7 +488,7 @@ def pretrainD(modelD, learning_rate=0.01, batch_size=128):
 # except FileNotFoundError:
 #     print("Model parameters loading failed.")
 #
-# # 测试时的模型不需要再cuda上运行，所以生成测试数据时传入参数 to_device=False
+# # 测试时的模型不需要在cuda上运行，所以生成测试数据时传入参数 to_device=False
 # posData = [tensorFromPair(random.choice(TrainSet), to_device=False) for _ in range(5)]
 # negData = [tensorFromPair(random.choice(GenSet), to_device=False) for _ in range(5)]
 #
@@ -481,7 +497,7 @@ def pretrainD(modelD, learning_rate=0.01, batch_size=128):
 # for i in range(5):
 #     Disc_output = torch.exp(DiscModel(posData[i]))
 #     print("--------------------------------------------------------")
-#     print("<source>: {}\n<target>: {}\n<DiscOutput>: {:.2f}"
+#     print("<source>: {}\n<target>: {}\n<DiscOutput>: {}"
 #       .format(index2sentence(posData[i][0].squeeze().numpy(), index2word),
 #               index2sentence(posData[i][1].squeeze().numpy(), index2word),
 #               Disc_output))
@@ -491,7 +507,7 @@ def pretrainD(modelD, learning_rate=0.01, batch_size=128):
 # for i in range(5):
 #     Disc_output = torch.exp(DiscModel(negData[i]))
 #     print("--------------------------------------------------------")
-#     print("<source>: {}\n<target>: {}\n<DiscOutput>: {:.2f}"
+#     print("<source>: {}\n<target>: {}\n<DiscOutput>: {}"
 #       .format(index2sentence(negData[i][0].squeeze().numpy(), index2word),
 #               index2sentence(negData[i][1].squeeze().numpy(), index2word),
 #               Disc_output))
