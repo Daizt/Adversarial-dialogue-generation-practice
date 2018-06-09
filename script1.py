@@ -4,15 +4,13 @@ import torch.nn.functional as F
 from torch import optim
 import random
 
-
-
 ############################# PREDEFINED ################################
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 TrainSetDir = "./data/s_given_t_dialogue_length2_6.txt"
 TestSetDir = "./data/s_given_t_test.txt"
 DicDir = "./data/movie_25000"
-GenPairsDir = "./data/generated_dialogue.txt"
+GenSetDir = "./data/generated_dialogue.txt"
 
 MaxLength = 20
 MinLength = 5
@@ -35,6 +33,7 @@ def filterPair(p):
 
 def filterPairs(pairs):
     return [pair for pair in pairs if filterPair(pair)]
+
 
 def PrepareData(set1_dir=None, set2_dir=None,
                 dic_dir=None):
@@ -73,21 +72,33 @@ def PrepareData(set1_dir=None, set2_dir=None,
 
     return set1, set2, dic
 
-
+# Loading positive data and negative data
 TrainSet, TestSet, index2word = PrepareData(set1_dir=TrainSetDir,
                                             set2_dir=TestSetDir,
                                             dic_dir=DicDir)
+GenSet, _, _ = PrepareData(set1_dir=GenSetDir)
 
 # random_pair = random.choice(TrainSet)
 # print("Showing a random pair of train_set: \n>> {}\n>> {}"
 #       .format(index2sentence(random_pair[0], index2word), index2sentence(random_pair[1], index2word)))
 
-def tensorFromPair(pair):
+def tensorFromPair(pair, to_device=True):
     input_tensor = pair[0]
-    input_tensor = torch.tensor(input_tensor, dtype=torch.long).view(-1,1)
     target_tensor = pair[1]
-    target_tensor.append(EOS_Token)
-    target_tensor = torch.tensor(target_tensor, dtype=torch.long).view(-1,1)
+
+    if to_device:
+        input_tensor = torch.tensor(input_tensor, dtype=torch.long).view(-1,1).to(device)
+
+        if target_tensor[-1] != EOS_Token:
+            target_tensor.append(EOS_Token)
+        target_tensor = torch.tensor(target_tensor, dtype=torch.long).view(-1,1).to(device)
+
+    else:
+        input_tensor = torch.tensor(input_tensor, dtype=torch.long).view(-1, 1)
+
+        if target_tensor[-1] != EOS_Token:
+            target_tensor.append(EOS_Token)
+        target_tensor = torch.tensor(target_tensor, dtype=torch.long).view(-1, 1)
 
     return input_tensor, target_tensor
 
@@ -179,9 +190,9 @@ class hierEncoder(nn.Module):
         self.linear1 = nn.Linear(self.embedding_size, 128)
         self.linear2 = nn.Linear(128, 2)
 
-    def forward(self, pair, tag):
-        # pair为对话 {x, y} ；tag为标签，其中 0 表示人生成的对话， 1 表示generator生成的对话。二者类型均为torch.tensor()
-        # example: pair = torch.tensor([[3,2,11,12],[1,3,24,123,5]]), tag = torch.tensor([0])
+    def forward(self, pair):
+        # pair为对话 {x, y} 类型为torch.tensor()
+        # example: pair = torch.tensor([[3,2,11,12],[1,3,24,123,5]])
         x_length = pair[0].size(0)
         y_length = pair[1].size(0)
 
@@ -213,18 +224,6 @@ class hierEncoder(nn.Module):
 
 ############################# Pretraining ################################
 
-###################### A demo of using Generator ########################
-# Gen_encoder = EncoderG()
-# Gen_decoder = DecoderG()
-# input_tensor, target_tensor = tensorFromPair(random_pair)
-# Gen_output = GenForward(Gen_encoder,Gen_decoder,input_tensor)
-#
-# print("A test of Generator: \n<source>: {}\n<target>: {}\n<generated>: {}"
-#       .format(index2sentence(random_pair[0], index2word),
-#               index2sentence(random_pair[1], index2word),
-#               index2sentence(Gen_output, index2word)))
-##########################################################################
-
 import time
 import math
 
@@ -255,8 +254,8 @@ def pretrainG(encoder, decoder, batch_size=128, max_length=MaxLength, learning_r
     for iter in range(1, batch_size + 1):
         ## data loading ##
         training_pair = training_pairs[iter-1]
-        input_tensor = training_pair[0].to(device)
-        target_tensor = training_pair[1].to(device)
+        input_tensor = training_pair[0]
+        target_tensor = training_pair[1]
 
         encoder_hidden = encoder.initHidden().to(device)
 
@@ -303,48 +302,85 @@ def pretrainG(encoder, decoder, batch_size=128, max_length=MaxLength, learning_r
                     break
 
         ## BPTT & Parameters updating ##
-        loss.backward()
+        # total_loss += loss.item()
+        # loss.backward()
+        # encoder_optimizer.step()
+        # decoder_optimizer.step()
 
-        encoder_optimizer.step()
-        decoder_optimizer.step()
+        total_loss += loss
 
-        total_loss += loss.item()
+    ## BPTT & Parameters updating ##
+    total_loss.backward()
+    encoder_optimizer.step()
+    decoder_optimizer.step()
 
-        # if iter % print_loss_every == 0:
-        #     average_loss = total_loss/print_loss_every
-        #     total_loss = 0
-        #     print('%s progress: (%d %d%%) average loss: %.4f' % (timeSince(start_time, iter / batch_size),
-        #                                                          iter, iter / batch_size * 100, average_loss))
+    print("Time consumed: {} Average loss: {:.2f} ".format(asMinutes(time.time()-start_time),
+                                                          total_loss.item()/batch_size))
 
-    print("Time consumed: {} Average loss: {} ".format(asMinutes(time.time()-start_time), total_loss/batch_size))
 
-    return 0
+def pretrainD(modelD, learning_rate=0.01, batch_size=128):
+    # prepare data
+    pos_data = [tensorFromPair(random.choice(TrainSet)) for _ in range(batch_size)]
+    neg_data = [tensorFromPair(random.choice(GenSet)) for _ in range(batch_size)]
+
+    # define optimizer & criterion
+    discOptimizer = optim.SGD(modelD.parameters(), lr=learning_rate)
+    criterion = nn.NLLLoss()
+    discOptimizer.zero_grad()
+
+    # some predefined variable
+    # 注意：规定 Discriminator 的输出概率的含义为 [positive_probability, negative_probability]
+    posTag = torch.tensor([0]).to(device)
+    negTag = torch.tensor([1]).to(device)
+    loss = 0
+    start_time = time.time()
+
+    for iter in range(batch_size):
+        # choose positive or negative pair randomly
+        pick_positive_data = True if random.random() < 0.5 else False
+        if pick_positive_data:
+            output = modelD(pos_data[iter])
+            loss += criterion(output, posTag)
+        else:
+            output = modelD(neg_data[iter])
+            loss += criterion(output, negTag)
+
+    # BPTT & params updating
+    loss.backward()
+    discOptimizer.step()
+
+    print("Time consumed: {} Average loss: {:.2f} ".format(asMinutes(time.time()-start_time),
+                                                          loss.item()/batch_size))
 
 ########################### pretrain Generator #########################################
-Gen_encoder = EncoderG().to(device)
-Gen_decoder = DecoderG().to(device)
-
-try:
-    Gen_encoder.load_state_dict(torch.load("./ModelParams/Gen_encoder_params.pkl"))
-    Gen_decoder.load_state_dict(torch.load("./ModelParams/Gen_decoder_params.pkl"))
-    print("Model parameters loaded.")
-except FileNotFoundError:
-    print("Model parameters loading failed.")
-
-for epoch in range(5):
-    pretrainG(Gen_encoder, Gen_decoder)
-    ans = input("Do you want to stop training and save the model? [y/n]")
-    if ans == 'y':
-        break
-    else:
-        print("Proceed with training...")
-
-try:
-    torch.save(Gen_encoder.state_dict(), "./ModelParams/Gen_encoder_params.pkl")
-    torch.save(Gen_decoder.state_dict(), "./ModelParams/Gen_decoder_params.pkl")
-    print("Model parameters saved successfully.")
-except:
-    print("Failed to save model parameters.")
+# Gen_encoder = EncoderG().to(device)
+# Gen_decoder = DecoderG().to(device)
+#
+# try:
+#     Gen_encoder.load_state_dict(torch.load("./ModelParams/Gen_encoder_params.pkl"))
+#     Gen_decoder.load_state_dict(torch.load("./ModelParams/Gen_decoder_params.pkl"))
+#     print("Model parameters loaded successfully.")
+# except FileNotFoundError:
+#     print("Model parameters loading failed.")
+#
+# Interrupt_Flag = False
+# print("Start training...(You can stop training by enter 'CTrl + C')")
+# for epoch in range(1000):
+#     if Interrupt_Flag:
+#         print("Stop training...")
+#         break
+#     else:
+#         try:
+#             pretrainG(Gen_encoder, Gen_decoder, learning_rate=0.001)
+#         except KeyboardInterrupt:
+#             Interrupt_Flag = True
+#
+# try:
+#     torch.save(Gen_encoder.state_dict(), "./ModelParams/Gen_encoder_params.pkl")
+#     torch.save(Gen_decoder.state_dict(), "./ModelParams/Gen_decoder_params.pkl")
+#     print("Model parameters saved successfully.")
+# except:
+#     print("Failed to save model parameters.")
 
 #########################################################################################
 
@@ -355,7 +391,7 @@ except:
 # try:
 #     Gen_encoder.load_state_dict(torch.load("./ModelParams/Gen_encoder_params.pkl"))
 #     Gen_decoder.load_state_dict(torch.load("./ModelParams/Gen_decoder_params.pkl"))
-#     print("Model parameters loaded.")
+#     print("Model parameters loaded successfully.")
 # except FileNotFoundError:
 #     print("Model parameters loading failed.")
 #
@@ -379,7 +415,7 @@ except:
 #               index2sentence(test_pairs[i][1].squeeze().numpy(), index2word),
 #               index2sentence(Gen_output, index2word)))
 #
-# # 生成数据
+# # generate negative data
 # with open("./data/generated_dialogue.txt", 'a', encoding='utf-8') as f:
 #     for i in range(1000):
 #         s = ''
@@ -398,25 +434,69 @@ except:
 
 ######################################################################################################
 
-###################### 模型保存笔记 ####################################
-# # 保存和加载整个模型
-# torch.save(model_object, 'model.pkl')
-# model = torch.load('model.pkl')
-#
-# # 仅保存和加载模型参数(推荐使用)
-# torch.save(model_object.state_dict(), 'params.pkl')
-# model_object.load_state_dict(torch.load('params.pkl'))
-#######################################################################
-
 ########################### Pretrain Discriminator ############################################
-
-
-
-
-
+# Discriminator = hierEncoder().to(device)
+#
+# try:
+#     Discriminator.load_state_dict(torch.load("./ModelParams/Disc_params.pkl"))
+#     print("Model parameters loaded successfully.")
+# except FileNotFoundError:
+#     print("Model parameters loading failed.")
+#
+# Interrupt_Flag = False
+# print("Start training...(You can stop training by enter 'CTrl + C')")
+# for epoch in range(1000):
+#     if Interrupt_Flag:
+#         print("Stop training...")
+#         break
+#     else:
+#         try:
+#             pretrainD(Discriminator, learning_rate=0.001)
+#         except KeyboardInterrupt:
+#             Interrupt_Flag = True
+#
+# try:
+#     torch.save(Gen_encoder.state_dict(), "./ModelParams/Disc_params.pkl")
+#     print("Model parameters saved successfully.")
+# except:
+#     print("Failed to save model parameters.")
 
 ###############################################################################################
 
+#################################### Test Discriminator #######################################
+# DiscModel = hierEncoder()
+#
+# try:
+#     DiscModel.load_state_dict(torch.load("./ModelParams/Disc_params.pkl"))
+#     print("Model parameters loaded successfully.")
+# except FileNotFoundError:
+#     print("Model parameters loading failed.")
+#
+# # 测试时的模型不需要再cuda上运行，所以生成测试数据时传入参数 to_device=False
+# posData = [tensorFromPair(random.choice(TrainSet), to_device=False) for _ in range(5)]
+# negData = [tensorFromPair(random.choice(GenSet), to_device=False) for _ in range(5)]
+#
+# print("----------------Evaluation on positive pairs: --------------------- ")
+# print("----------------DiscOutput denotes: [p(positive), p(negative)] ----------------- ")
+# for i in range(5):
+#     Disc_output = torch.exp(DiscModel(posData[i]))
+#     print("--------------------------------------------------------")
+#     print("<source>: {}\n<target>: {}\n<DiscOutput>: {:.2f}"
+#       .format(index2sentence(posData[i][0].squeeze().numpy(), index2word),
+#               index2sentence(posData[i][1].squeeze().numpy(), index2word),
+#               Disc_output))
+#
+# print("----------------Evaluation on negative pairs: --------------------- ")
+# print("----------------DiscOutput denotes: [p(positive), p(negative)] ----------------- ")
+# for i in range(5):
+#     Disc_output = torch.exp(DiscModel(negData[i]))
+#     print("--------------------------------------------------------")
+#     print("<source>: {}\n<target>: {}\n<DiscOutput>: {:.2f}"
+#       .format(index2sentence(negData[i][0].squeeze().numpy(), index2word),
+#               index2sentence(negData[i][1].squeeze().numpy(), index2word),
+#               Disc_output))
+
+###############################################################################################
 
 
 
