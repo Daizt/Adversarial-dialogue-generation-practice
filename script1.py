@@ -4,11 +4,17 @@ import torch.nn.functional as F
 from torch import optim
 import random
 
+
+"""原数据提供的词典当中有大量无效索引，其对应的索引值为数字，将数据经
+过过滤后得到的对话存入trimmed_dialogue.txt文件当中作为训练数据。"""
+
 ############################# PREDEFINED ################################
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 TrainSetDir = "./data/s_given_t_dialogue_length2_6.txt"
 TestSetDir = "./data/s_given_t_test.txt"
+TrimmedSetDir = "./data/trimmed_dialogue.txt"
+InvalidIndexDir = "./data/invalid_index.txt"
 DicDir = "./data/movie_25000"
 GenSetDir = "./data/generated_dialogue.txt"
 
@@ -19,24 +25,39 @@ EOS_Token = 25001
 VocabSize = 25002
 EmbeddingSize = 512
 
+
 ############################ Data Preparation #############################
 
 def index2sentence(l, dic):
+    # example l = [1, 2, 3]
     s = ''
     for index in l:
         s += dic[index] + ' '
     return s
 
-def filterPair(p):
-    return (len(p[0])<MaxLength and len(p[1])<MaxLength and len(p[1])>MinLength and
-            1 not in p[0] and 1 not in p[1])
+invalid_index = []
+# 读取无效索引值
+with open(InvalidIndexDir, 'r', encoding='utf-8') as f:
+    for line in f.readlines():
+        invalid_index.append(int(line.strip('\n')))
+
+def filterPair(p, invalid_index=invalid_index):
+    # example: p = [[1,2,3],[4,5,6]]
+
+    return (len(p[0])<MaxLength and
+            len(p[1])<MaxLength and
+            len(p[1])>MinLength and
+            1 not in p[0] and
+            1 not in p[1] and
+            len(set(invalid_index) & set(p[0])) == 0 and
+            len(set(invalid_index) & set(p[1])) == 0)
 
 def filterPairs(pairs):
     return [pair for pair in pairs if filterPair(pair)]
 
 
 def PrepareData(set1_dir=None, set2_dir=None,
-                dic_dir=None):
+                dic_dir=None,if_filter=True):
     set1 = []
     set2 = []
     dic = {0:'<SOS>', 25001:'<EOS>'}
@@ -58,29 +79,56 @@ def PrepareData(set1_dir=None, set2_dir=None,
             set2[i] = [[int(index) for index in set2[i][0].split()],
                            [int(index) for index in set2[i][1].split()]]
 
-    if dic_dir !=None:
+    if dic_dir != None:
         with open(dic_dir, 'r', encoding='utf-8') as f:
             for i, word in enumerate(f.readlines()):
                 dic[i + 1] = word.strip('\n')  # 注意：字典里的索引应该从1而不是0开始！
 
     print("{} training pairs loaded, {} testing pairs loaded. ".format(len(set1), len(set2)))
 
-    set1 = filterPairs(set1)
-    set2 = filterPairs(set2)
-
-    print("Trimmed to {} training pairs and {} testing pairs. ".format(len(set1), len(set2)))
+    if if_filter:
+        set1 = filterPairs(set1)
+        set2 = filterPairs(set2)
+        print("Trimmed to {} training pairs and {} testing pairs. ".format(len(set1), len(set2)))
 
     return set1, set2, dic
 
+
+############################## 用作数据预处理 ###############################
 # Loading positive data and negative data
-TrainSet, TestSet, index2word = PrepareData(set1_dir=TrainSetDir,
-                                            set2_dir=TestSetDir,
-                                            dic_dir=DicDir)
-GenSet, _, _ = PrepareData(set1_dir=GenSetDir)
+# TrainSet, TestSet, index2word = PrepareData(set1_dir=TrainSetDir,
+#                                             set2_dir=TestSetDir,
+#                                             dic_dir=DicDir)
+# GenSet, _, _ = PrepareData(set1_dir=GenSetDir)
+#
+# # 保存过滤后的数据
+# with open("./data/trimmed_dialogue.txt", 'w', encoding='utf-8') as f:
+#     for pair in TrainSet:
+#         s = ''
+#         for num in pair[0]:
+#             s+=str(num)+' '
+#         s += '|'
+#         for num in pair[1]:
+#             s += str(num) +' '
+#         s += '\n'
+#         f.write(s)
 
 # random_pair = random.choice(TrainSet)
 # print("Showing a random pair of train_set: \n>> {}\n>> {}"
-#       .format(index2sentence(random_pair[0], index2word), index2sentence(random_pair[1], index2word)))
+#       .format(index2sentence(random_pair[0], index2word),
+#       index2sentence(random_pair[1], index2word)))
+##############################################################################
+
+
+########################### 数据加载 #####################################
+
+TrainSet, TestSet, index2word = PrepareData(set1_dir=TrimmedSetDir,
+                                            set2_dir=TestSetDir,
+                                            dic_dir=DicDir,
+                                            if_filter=False)
+GenSet, _, _ = PrepareData(set1_dir=GenSetDir)
+
+#########################################################################
 
 def tensorFromPair(pair, to_device=True):
     input_tensor = pair[0]
@@ -115,6 +163,7 @@ class EncoderG(nn.Module):
         self.gru = nn.GRU(self.embedding_size, self.hidden_size, dropout = self.drop_out)
 
     def forward(self, input, hidden):
+        '''example: input = torch.tensor([12])'''
         embedded = self.embedding(input).view(1, 1, -1)
         output, hidden = self.gru(embedded, hidden)
         return output, hidden
@@ -151,19 +200,32 @@ class DecoderG(nn.Module):
     def initHidden(self):
         return torch.zero(1, 1, self.embedding_size)#.to(device)
 
-def GenForward(encoder_G, decoder_G, input_tensor, max_length=MaxLength):
+def GenForward(encoder_G, decoder_G, input_tensor, max_length=MaxLength, to_device=False):
     '''Using Generator to generate answer given an input_tensor'''
+    # input_tensor example: torch.tensor([[21],[11],[1]], dtype=torch.long)
+    # output type: list(). example: decoder_outputs = [1,2,3]
 
     input_length = input_tensor.size(0)
-    encoder_hidden = encoder_G.initHidden()
-    encoder_outputs = torch.zeros(max_length, encoder_G.hidden_size)
+
+    if to_device:
+        encoder_hidden = encoder_G.initHidden().to(device)
+        encoder_outputs = torch.zeros(max_length, encoder_G.hidden_size).to(device)
+    else:
+        encoder_hidden = encoder_G.initHidden()
+        encoder_outputs = torch.zeros(max_length, encoder_G.hidden_size)
+
+
     decoder_outputs = []
 
     for i in range(input_length):
         encoder_output, encoder_hidden = encoder_G(input_tensor[i], encoder_hidden)
         encoder_outputs[i] = encoder_output[0][0]
 
-    decoder_input = torch.tensor([SOS_Token])
+    if to_device:
+        decoder_input = torch.tensor([SOS_Token]).to(device)
+    else:
+        decoder_input = torch.tensor([SOS_Token])
+
     decoder_hidden = encoder_hidden
 
     for i in range(max_length):
@@ -254,8 +316,8 @@ def pretrainG(encoder, decoder, batch_size=128, max_length=MaxLength, learning_r
               teacher_forcing_ratio = 0.5):
     start_time = time.time()
     total_loss = 0
-    encoder_optimizer = optim.SGD(encoder.parameters(), lr=learning_rate)
-    decoder_optimizer = optim.SGD(decoder.parameters(), lr=learning_rate)
+    encoder_optimizer = optim.SGD(encoder.parameters(), lr=learning_rate, momentum=0.8)
+    decoder_optimizer = optim.SGD(decoder.parameters(), lr=learning_rate, momentum=0.8)
 
     ## training data loading ##
     training_pairs = [tensorFromPair(random.choice(TrainSet)) for i in range(batch_size)]
@@ -312,18 +374,18 @@ def pretrainG(encoder, decoder, batch_size=128, max_length=MaxLength, learning_r
                 if decoder_input.item() == EOS_Token:
                     break
 
-        ## BPTT & Parameters updating ##
-        # total_loss += loss.item()
-        # loss.backward()
-        # encoder_optimizer.step()
-        # decoder_optimizer.step()
-
+        ## BPTT & Parameters updating (every sentence)##
         total_loss += loss
+        loss.backward()
+        encoder_optimizer.step()
+        decoder_optimizer.step()
 
-    ## BPTT & Parameters updating ##
-    total_loss.backward()
-    encoder_optimizer.step()
-    decoder_optimizer.step()
+
+    # ## BPTT & Parameters updating (every batch)##
+    #     total_loss += loss
+    # total_loss.backward()
+    # encoder_optimizer.step()
+    # decoder_optimizer.step()
 
     print("Time consumed: {} Average loss: {:.2f} ".format(asMinutes(time.time()-start_time),
                                                           total_loss.item()/batch_size))
@@ -335,7 +397,7 @@ def pretrainD(modelD, learning_rate=0.01, batch_size=128, to_device=True):
     neg_data = [tensorFromPair(random.choice(GenSet), to_device=to_device) for _ in range(batch_size)]
 
     # define optimizer & criterion
-    discOptimizer = optim.SGD(modelD.parameters(), lr=learning_rate)
+    discOptimizer = optim.SGD(modelD.parameters(), lr=learning_rate, momentum=0.8)
     criterion = nn.NLLLoss()
     discOptimizer.zero_grad()
 
@@ -380,7 +442,7 @@ def pretrainD(modelD, learning_rate=0.01, batch_size=128, to_device=True):
 #     print("Model parameters loading failed.")
 #
 # Interrupt_Flag = False
-# print("Start training...(You can stop training by enter 'CTrl + C')")
+# print("Start training...(You can stop training by enter 'Ctrl + C')")
 # for epoch in range(1000):
 #     if Interrupt_Flag:
 #         print("Stop training...")
@@ -400,7 +462,7 @@ def pretrainD(modelD, learning_rate=0.01, batch_size=128, to_device=True):
 
 #########################################################################################
 
-############# Test Generator & Provide negative data for training Discriminator ##################
+# ############# Test Generator & Provide negative data for training Discriminator ##################
 # Gen_encoder = EncoderG()
 # Gen_decoder = DecoderG()
 #
@@ -460,7 +522,7 @@ def pretrainD(modelD, learning_rate=0.01, batch_size=128, to_device=True):
 #     print("Model parameters loading failed.")
 #
 # Interrupt_Flag = False
-# print("Start training...(You can stop training by enter 'CTrl + C')")
+# print("Start training...(You can stop training by enter 'Ctrl + C')")
 # for epoch in range(1000):
 #     if Interrupt_Flag:
 #         print("Stop training...")
@@ -514,10 +576,238 @@ def pretrainD(modelD, learning_rate=0.01, batch_size=128, to_device=True):
 
 ###############################################################################################
 
+######################################### REINFORCE #########################################
+
+Gen_encoder = EncoderG().to(device)
+Gen_decoder = DecoderG().to(device)
+
+try:
+    Gen_encoder.load_state_dict(torch.load("./ModelParams/Gen_encoder_params.pkl"))
+    Gen_decoder.load_state_dict(torch.load("./ModelParams/Gen_decoder_params.pkl"))
+    print("Generator Model parameters loaded successfully.")
+except FileNotFoundError:
+    print("Generator Model parameters loading failed.")
 
 
+Discriminator = hierEncoder().to(device)
+
+try:
+    Discriminator.load_state_dict(torch.load("./ModelParams/Disc_params.pkl"))
+    print("Discriminator Model parameters loaded successfully.")
+except FileNotFoundError:
+    print("Discriminator Model parameters loading failed.")
 
 
+def REINFORCE_TRAINING(ModelGEncoder,
+                       ModelGDecoder,
+                       ModelD,
+                       num_iter=1,
+                       D_steps=5,
+                       G_steps=1,
+                       batch_size=128,
+                       learning_rate=0.001,
+                       if_use_MC=False,
+                       if_use_critic=False,
+                       teacher_forcing_rate=0.5,
+                       max_length=MaxLength):
+
+    '''num_iter: 训练迭代次数
+       D_steps: 每次迭代训练Discriminator次数
+       G_steps: 每次迭代训练Generator次数
+       teacher_forcing_rate: 训练Generator时采用teacher_forcing的概率'''
+
+    DiscOptimizer = optim.SGD(ModelD.parameters(), lr=learning_rate, momentum=0.8)
+
+    CriterionNLLLoss = nn.NLLLoss()
+
+    posTag = torch.tensor([0]).to(device)
+    negTag = torch.tensor([1]).to(device)
+
+    for iter in range(num_iter):
+
+        ############## Train Discriminator ##############
+        print("Train Discriminator...")
+        total_loss = 0
+        start_time = time.time()
+        for di in range(D_steps):
+            # Sample {(x,y)} from real data
+            for ei in range(batch_size):
+                # Sample (x, y_hat) from Generator
+                pos_pair = tensorFromPair(random.choice(TrainSet))
+                neg_y = GenForward(ModelGEncoder, ModelGDecoder, pos_pair[0], to_device=True)
+                neg_y = torch.tensor(neg_y, dtype=torch.long).view(-1, 1).to(device)
+                neg_pair = [pos_pair[0], neg_y]
+
+                loss = 0   # 单个样本的loss
+
+                # Update D
+                DiscOptimizer.zero_grad()
+                output = ModelD(pos_pair, to_device=True)
+                loss += CriterionNLLLoss(output, posTag)
+                output = ModelD(neg_pair, to_device=True)
+                loss += CriterionNLLLoss(output, negTag)
+                loss.backward()
+                DiscOptimizer.step()
+
+                total_loss += loss
+
+        print("Time Consumed: <{}> Batch Loss: <{:.4f}> ".format(asMinutes(time.time() - start_time),
+                                                               total_loss.item()/D_steps))
+
+        ################ Train Generator ###############
+        print("Train Generator...")
+        total_loss = 0
+        start_time = time.time()
+        for gi in range(G_steps):
+
+            rewards = []
+            for ei in range(batch_size):
+                # Sample (x, y) from real data
+                real_pair = tensorFromPair(random.choice(TrainSet))
+                # Sample (x, y_hat) from generator
+                gen_y = GenForward(ModelGEncoder, ModelGDecoder, real_pair[0], to_device=True)
+                gen_y = torch.tensor(gen_y, dtype=torch.long).view(-1, 1).to(device)
+                gen_pair = [real_pair[0], gen_y]
+
+                loss = 0      # 单个样本的loss
+
+                # Compute reward r for {(x, y_hat)} using D
+                reward = torch.exp(ModelD(gen_pair, to_device=True)).squeeze()[0].item()
+                rewards.append(reward)
+
+                # Update G
+                use_teacher_forcing = True if random.random() < teacher_forcing_rate else False
+
+                # 采用teacher_forcing
+                if use_teacher_forcing:
+                    GenEncoderOptimizer = optim.SGD(ModelGEncoder.parameters(), lr=learning_rate, momentum=0.8)
+                    GenDecoderOptimizer = optim.SGD(ModelGDecoder.parameters(), lr=learning_rate, momentum=0.8)
+
+                    GenEncoderOptimizer.zero_grad()
+                    GenDecoderOptimizer.zero_grad()
+
+                    input_tensor = real_pair[0]
+                    target_tensor = real_pair[1]
+
+                    encoder_hidden = ModelGEncoder.initHidden().to(device)
+
+                    input_length = input_tensor.size(0)
+                    target_length = target_tensor.size(0)
+
+                    encoder_outputs = torch.zeros(max_length, ModelGEncoder.hidden_size).to(device)
+                    ## encoding ##
+                    for i in range(input_length):
+                        encoder_output, encoder_hidden = ModelGEncoder(input_tensor[i], encoder_hidden)
+                        encoder_outputs[i] = encoder_output[0][0]
+
+                    decoder_input = torch.tensor([SOS_Token]).to(device)
+                    decoder_hidden = encoder_hidden.to(device)
+
+                    ## decoding ##
+                    for di in range(target_length):
+                        decoder_output, decoder_hidden, decoder_attention = ModelGDecoder(
+                            decoder_input, decoder_hidden, encoder_outputs)
+                        topv, topi = decoder_output.topk(1)
+                        decoder_input = topi.squeeze().detach()  # detach from history as input
+
+                        loss += CriterionNLLLoss(decoder_output, target_tensor[di])
+
+                        if decoder_input.item() == EOS_Token:
+                            break
+
+                    ## BPTT & Parameters updating (every sentence)##
+                    total_loss += loss
+                    loss.backward()
+                    GenEncoderOptimizer.step()
+                    GenDecoderOptimizer.step()
+
+                # REINFORCE
+                else:
+                    if if_use_critic:
+                        # 训练critic并使用critic计算baseline
+                        pass
+
+                    else:
+                        # 使用reward平均值作为baseline
+                        baseline = sum(rewards)/len(rewards)
+
+                        # 根据原公式采用REINFORCE算法计算梯度时（r - b）并不参与求导，只相当于改变了learning_rate
+                        if (reward - baseline) > 0:
+                            # as_lr = learning_rate * (reward - baseline)
+                            as_lr = learning_rate * (1 + reward)
+                        else:
+                            as_lr = learning_rate
+
+                        GenEncoderOptimizer = optim.SGD(ModelGEncoder.parameters(), lr=as_lr, momentum=0.8)
+                        GenDecoderOptimizer = optim.SGD(ModelGDecoder.parameters(), lr=as_lr, momentum=0.8)
+
+                        GenEncoderOptimizer.zero_grad()
+                        GenDecoderOptimizer.zero_grad()
+
+                        # forward propagation
+                        input_tensor = real_pair[0]
+                        encoder_hidden = ModelGEncoder.initHidden().to(device)
+                        input_length = input_tensor.size(0)
+                        encoder_outputs = torch.zeros(max_length, ModelGEncoder.hidden_size).to(device)
+                        ## encoding ##
+                        for i in range(input_length):
+                            encoder_output, encoder_hidden = ModelGEncoder(input_tensor[i], encoder_hidden)
+                            encoder_outputs[i] = encoder_output[0][0]
+
+                        decoder_input = torch.tensor([SOS_Token]).to(device)
+                        decoder_hidden = encoder_hidden.to(device)
+                        ## decoding ##
+                        for di in range(max_length):
+                            decoder_output, decoder_hidden, decoder_attention = ModelGDecoder(
+                                decoder_input, decoder_hidden, encoder_outputs)
+                            topv, topi = decoder_output.topk(1)
+                            decoder_input = topi.squeeze().detach()  # detach from history as input
+
+                            # 计算生成 {y_hat} 的概率
+                            loss += topv.squeeze()
+
+                            if decoder_input.item() == EOS_Token:
+                                break
+
+                        # 由于REINFORCE的目标是最大化期望的reward，所以将loss取反
+                        total_loss += loss
+                        loss = -loss
+
+                        # back propagation & update params
+                        loss.backward()
+                        GenEncoderOptimizer.step()
+                        GenDecoderOptimizer.step()
+
+        print("Time Consumed: <{}> Negative Average Loss: <{:.2f}> ".format(asMinutes(time.time() - start_time),
+                                                               total_loss.item() / batch_size / G_steps))
+        print("-----------------------------------------------------------------------------------")
+
+
+########### REINFORCE training ###########
+Interrupt_Flag = False
+print("Start training...(You can stop training by enter 'Ctrl + C')")
+for epoch in range(1000):
+    if Interrupt_Flag:
+        print("Stop training...")
+        break
+    else:
+        try:
+            REINFORCE_TRAINING(Gen_encoder,Gen_decoder,Discriminator)
+        except KeyboardInterrupt:
+            Interrupt_Flag = True
+
+try:
+    torch.save(Gen_encoder.state_dict(), "./ModelParams/Gen_encoder_params.pkl")
+    torch.save(Gen_decoder.state_dict(), "./ModelParams/Gen_decoder_params.pkl")
+    print("Generator Model parameters saved successfully.")
+except:
+    print("Failed to save Generator model parameters.")
+
+try:
+    torch.save(Discriminator.state_dict(), "./ModelParams/Disc_params.pkl")
+    print("Discriminator Model parameters saved successfully.")
+except:
+    print("Failed to save Discriminator model parameters.")
 
 
 
