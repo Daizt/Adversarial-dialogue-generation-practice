@@ -578,26 +578,6 @@ def pretrainD(modelD, learning_rate=0.01, batch_size=128, to_device=True):
 
 ######################################### REINFORCE #########################################
 
-Gen_encoder = EncoderG().to(device)
-Gen_decoder = DecoderG().to(device)
-
-try:
-    Gen_encoder.load_state_dict(torch.load("./ModelParams/Gen_encoder_params.pkl"))
-    Gen_decoder.load_state_dict(torch.load("./ModelParams/Gen_decoder_params.pkl"))
-    print("Generator Model parameters loaded successfully.")
-except FileNotFoundError:
-    print("Generator Model parameters loading failed.")
-
-
-Discriminator = hierEncoder().to(device)
-
-try:
-    Discriminator.load_state_dict(torch.load("./ModelParams/Disc_params.pkl"))
-    print("Discriminator Model parameters loaded successfully.")
-except FileNotFoundError:
-    print("Discriminator Model parameters loading failed.")
-
-
 def REINFORCE_TRAINING(ModelGEncoder,
                        ModelGDecoder,
                        ModelD,
@@ -605,7 +585,7 @@ def REINFORCE_TRAINING(ModelGEncoder,
                        D_steps=5,
                        G_steps=1,
                        batch_size=128,
-                       learning_rate=0.001,
+                       learning_rate=0.01,
                        if_use_MC=False,
                        if_use_critic=False,
                        teacher_forcing_rate=0.5,
@@ -638,20 +618,24 @@ def REINFORCE_TRAINING(ModelGEncoder,
                 neg_y = torch.tensor(neg_y, dtype=torch.long).view(-1, 1).to(device)
                 neg_pair = [pos_pair[0], neg_y]
 
-                loss = 0   # 单个样本的loss
-
                 # Update D
+                loss = 0  # 单个样本的loss
                 DiscOptimizer.zero_grad()
                 output = ModelD(pos_pair, to_device=True)
                 loss += CriterionNLLLoss(output, posTag)
+                loss.backward()
+                DiscOptimizer.step()
+                total_loss += loss
+
+                loss = 0
+                DiscOptimizer.zero_grad()
                 output = ModelD(neg_pair, to_device=True)
                 loss += CriterionNLLLoss(output, negTag)
                 loss.backward()
                 DiscOptimizer.step()
-
                 total_loss += loss
 
-        print("Time Consumed: <{}> Batch Loss: <{:.4f}> ".format(asMinutes(time.time() - start_time),
+        print("     Time Consumed: <{}>     Batch Loss: <{:.4f}> ".format(asMinutes(time.time() - start_time),
                                                                total_loss.item()/D_steps))
 
         ################ Train Generator ###############
@@ -736,10 +720,10 @@ def REINFORCE_TRAINING(ModelGEncoder,
                             # as_lr = learning_rate * (reward - baseline)
                             as_lr = learning_rate * (1 + reward)
                         else:
-                            as_lr = learning_rate
+                            as_lr = learning_rate * reward
 
-                        GenEncoderOptimizer = optim.SGD(ModelGEncoder.parameters(), lr=as_lr, momentum=0.8)
-                        GenDecoderOptimizer = optim.SGD(ModelGDecoder.parameters(), lr=as_lr, momentum=0.8)
+                        GenEncoderOptimizer = optim.SGD(ModelGEncoder.parameters(), lr=as_lr, momentum=0.3)
+                        GenDecoderOptimizer = optim.SGD(ModelGDecoder.parameters(), lr=as_lr, momentum=0.3)
 
                         GenEncoderOptimizer.zero_grad()
                         GenDecoderOptimizer.zero_grad()
@@ -778,12 +762,33 @@ def REINFORCE_TRAINING(ModelGEncoder,
                         GenEncoderOptimizer.step()
                         GenDecoderOptimizer.step()
 
-        print("Time Consumed: <{}> Negative Average Loss: <{:.2f}> ".format(asMinutes(time.time() - start_time),
+        print("     Time Consumed: <{}>     Negative Average Loss: <{:.2f}> ".format(asMinutes(time.time() - start_time),
                                                                total_loss.item() / batch_size / G_steps))
         print("-----------------------------------------------------------------------------------")
 
 
 ########### REINFORCE training ###########
+
+Gen_encoder = EncoderG().to(device)
+Gen_decoder = DecoderG().to(device)
+
+try:
+    Gen_encoder.load_state_dict(torch.load("./ModelParams/Gen_encoder_params.pkl"))
+    Gen_decoder.load_state_dict(torch.load("./ModelParams/Gen_decoder_params.pkl"))
+    print("Generator Model parameters loaded successfully.")
+except FileNotFoundError:
+    print("Generator Model parameters loading failed.")
+
+
+Discriminator = hierEncoder().to(device)
+
+try:
+    Discriminator.load_state_dict(torch.load("./ModelParams/Disc_params.pkl"))
+    print("Discriminator Model parameters loaded successfully.")
+except FileNotFoundError:
+    print("Discriminator Model parameters loading failed.")
+
+
 Interrupt_Flag = False
 print("Start training...(You can stop training by enter 'Ctrl + C')")
 for epoch in range(1000):
@@ -792,7 +797,7 @@ for epoch in range(1000):
         break
     else:
         try:
-            REINFORCE_TRAINING(Gen_encoder,Gen_decoder,Discriminator)
+            REINFORCE_TRAINING(Gen_encoder, Gen_decoder, Discriminator, G_steps=2)
         except KeyboardInterrupt:
             Interrupt_Flag = True
 
