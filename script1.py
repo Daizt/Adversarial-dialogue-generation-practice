@@ -3,15 +3,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import optim
 import random
+import numpy as np
+import math
 
 
 """原数据提供的词典当中有大量无效索引，其对应的索引值为数字，将数据经
-过过滤后得到的对话存入trimmed_dialogue.txt文件当中作为训练数据。"""
-
-############################# PREDEFINED ################################
+过过滤后得
+############到的对话存入trimmed_dialogue.txt文件当中作为训练数据。"""
+################# PREDEFINED ################################
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
-TrainSetDir = "./data/s_given_t_dialogue_length2_6.txt"
+TrainSetDir = "./data/s_given_t_train.txt"
 TestSetDir = "./data/s_given_t_test.txt"
 TrimmedSetDir = "./data/trimmed_dialogue.txt"
 InvalidIndexDir = "./data/invalid_index.txt"
@@ -122,11 +124,10 @@ def PrepareData(set1_dir=None, set2_dir=None,
 
 ########################### 数据加载 #####################################
 
-TrainSet, TestSet, index2word = PrepareData(set1_dir=TrimmedSetDir,
+TrainSet, TestSet, index2word = PrepareData(set1_dir=TrainSetDir,
                                             set2_dir=TestSetDir,
-                                            dic_dir=DicDir,
-                                            if_filter=False)
-GenSet, _, _ = PrepareData(set1_dir=GenSetDir)
+                                            dic_dir=DicDir)
+GenSet, _, _ = PrepareData(set1_dir=GenSetDir, if_filter=False)
 
 #########################################################################
 
@@ -198,9 +199,16 @@ class DecoderG(nn.Module):
         return output, hidden, attn_weights
 
     def initHidden(self):
-        return torch.zero(1, 1, self.embedding_size)#.to(device)
+        return torch.zeros(1, 1, self.embedding_size)#.to(device)
 
-def GenForward(encoder_G, decoder_G, input_tensor, max_length=MaxLength, to_device=False):
+
+def GenForward(encoder_G,
+               decoder_G,
+               input_tensor,
+               max_length=MaxLength,
+               to_device=False,
+               if_beam_search=False,
+               beam_search_k=2):
     '''Using Generator to generate answer given an input_tensor'''
     # input_tensor example: torch.tensor([[21],[11],[1]], dtype=torch.long)
     # output type: list(). example: decoder_outputs = [1,2,3]
@@ -214,12 +222,10 @@ def GenForward(encoder_G, decoder_G, input_tensor, max_length=MaxLength, to_devi
         encoder_hidden = encoder_G.initHidden()
         encoder_outputs = torch.zeros(max_length, encoder_G.hidden_size)
 
-
-    decoder_outputs = []
-
-    for i in range(input_length):
-        encoder_output, encoder_hidden = encoder_G(input_tensor[i], encoder_hidden)
-        encoder_outputs[i] = encoder_output[0][0]
+    # Encoding
+    for k in range(input_length):
+        encoder_output, encoder_hidden = encoder_G(input_tensor[k], encoder_hidden)
+        encoder_outputs[k] = encoder_output[0][0]
 
     if to_device:
         decoder_input = torch.tensor([SOS_Token]).to(device)
@@ -228,15 +234,95 @@ def GenForward(encoder_G, decoder_G, input_tensor, max_length=MaxLength, to_devi
 
     decoder_hidden = encoder_hidden
 
-    for i in range(max_length):
-        decoder_output, decoder_hidden, decoder_attention = decoder_G(decoder_input, decoder_hidden, encoder_outputs)
-        topv, topi = decoder_output.topk(1)
-        decoder_input = topi.squeeze().detach()
-        decoder_outputs.append(decoder_input.item())
-        if decoder_input.item() == EOS_Token:
-            break
+    # Decoding
 
-    return decoder_outputs
+    # 采用beam search
+    if if_beam_search:
+        # 用来记录概率最大的k个选择的隐藏层, type: [torch.tensor()]
+        hidden_log = [decoder_hidden for _ in range(beam_search_k)]
+
+        # 用来记录最大的k个概率, type: [float]
+        prob_log = [0 for _ in range(beam_search_k)]
+
+        # 用来记录概率最大的k个选择的解码输出, type: [[int]]
+        decoder_outputs = np.empty([beam_search_k,1]).tolist()
+
+        # 先进行第一步解码
+        decoder_output, decoder_hidden, decoder_attention = decoder_G(decoder_input, decoder_hidden,
+                                                                        encoder_outputs)
+        # 选择概率最大的k个选项
+        topv, topi = decoder_output.topk(beam_search_k)
+
+        for k in range(beam_search_k):
+            # 记录隐藏层, type: [torch.tensor()]
+            hidden_log[k] = decoder_hidden
+
+            # 记录概率（默认降序排列）, type: [float]
+            prob_log[k] += topv.squeeze()[k].item()
+
+            # 记录输出（与prob_log的概率对应）, type: [int]
+            decoder_outputs[k].append(topi.squeeze()[k].item())
+            decoder_outputs[k].pop(0)   # 删除初始化时存入的元素
+
+        # beam search
+        for ei in range(max_length-1):
+            # 用以暂时存储概率在后续进行比较
+            if to_device:
+                temp_prob_log = torch.tensor([]).to(device)
+                temp_output_log = torch.tensor([], dtype=torch.long).to(device)
+                temp_hidden_log = []
+            else:
+                temp_prob_log = torch.tensor([])
+                temp_hidden_log = []
+                temp_output_log = torch.tensor([],dtype=torch.long)
+
+            for k in range(beam_search_k):
+                if to_device:
+                    decoder_input = torch.tensor([decoder_outputs[k][-1]], dtype=torch.long).to(device)
+
+                else:
+                    decoder_input = torch.tensor([decoder_outputs[k][-1]], dtype=torch.long)
+
+                decoder_hidden = hidden_log[k]
+                decoder_output, decoder_hidden, _ = decoder_G(decoder_input, decoder_hidden,
+                                                                            encoder_outputs)
+                # 初步比较
+                topv, topi = decoder_output.topk(beam_search_k)
+
+                temp_prob_log = torch.cat([temp_prob_log, topv], dim=1)
+                temp_hidden_log.append(decoder_hidden)
+                temp_output_log = torch.cat([temp_output_log, topi], dim=1)
+
+            # 最终比较（在 k*K 个候选项中选出概率最大的 k 个选项）
+            temp_topv, temp_topi = temp_prob_log.topk(beam_search_k)
+
+            # 记录结果(保持概率降序排列)
+            for k in range(beam_search_k):
+                ith = int(temp_topi.squeeze()[k].item()/beam_search_k)
+                hidden_log[k] = temp_hidden_log[ith]
+
+                prob_log[k] += temp_topv.squeeze()[k].detach().item()
+
+                decoder_outputs[k].append(temp_output_log.squeeze()[temp_topi.squeeze()[k].item()].detach().item())
+
+            # <EOS>
+            pass
+
+        return decoder_outputs, prob_log
+
+    # 采用贪心选择
+    else:
+        decoder_outputs = []
+        for k in range(max_length):
+            decoder_output, decoder_hidden, decoder_attention = decoder_G(decoder_input, decoder_hidden,
+                                                                          encoder_outputs)
+            topv, topi = decoder_output.topk(1)
+            decoder_input = topi.squeeze().detach()
+            decoder_outputs.append(decoder_input.item())
+            if decoder_input.item() == EOS_Token:
+                break
+
+        return decoder_outputs
 
 ############################# Discriminator ##############################
 class hierEncoder(nn.Module):
@@ -463,6 +549,7 @@ def pretrainD(modelD, learning_rate=0.01, batch_size=128, to_device=True):
 #########################################################################################
 
 # ############# Test Generator & Provide negative data for training Discriminator ##################
+############### Test Generator (without beam search) #########################
 # Gen_encoder = EncoderG()
 # Gen_decoder = DecoderG()
 #
@@ -492,10 +579,64 @@ def pretrainD(modelD, learning_rate=0.01, batch_size=128, to_device=True):
 #       .format(index2sentence(test_pairs[i][0].squeeze().numpy(), index2word),
 #               index2sentence(test_pairs[i][1].squeeze().numpy(), index2word),
 #               index2sentence(Gen_output, index2word)))
-#
+
+#################################################################################
+
+################### Test Generator (with beam search) ###########################
+Gen_encoder = EncoderG()
+Gen_decoder = DecoderG()
+
+try:
+    Gen_encoder.load_state_dict(torch.load("./ModelParams/Gen_encoder_params.pkl"))
+    Gen_decoder.load_state_dict(torch.load("./ModelParams/Gen_decoder_params.pkl"))
+    print("Model parameters loaded successfully.")
+except FileNotFoundError:
+    print("Model parameters loading failed.")
+
+train_pairs = [tensorFromPair(random.choice(TrainSet),to_device=False) for i in range(5)]
+test_pairs = [tensorFromPair(random.choice(TestSet),to_device=False) for i in range(5)]
+beam_search_k = 2
+
+print("----------------Evaluation on training set: --------------------- ")
+for i in range(5):
+    Gen_outputs, prob_log = GenForward(Gen_encoder,
+                                       Gen_decoder,
+                                       train_pairs[i][0],
+                                       if_beam_search=True,
+                                       beam_search_k=beam_search_k)
+
+    print("--------------------------------------------------------")
+    print("<Source>: {}\n<Target>: {}"
+      .format(index2sentence(train_pairs[i][0].squeeze().numpy(), index2word),
+              index2sentence(train_pairs[i][1].squeeze().numpy(), index2word)))
+    print("<Generated>: ")
+    for k in range(beam_search_k):
+        print("<Prob>: {}, <Sentence>: {}".format(math.exp(prob_log[k]),
+                                                  index2sentence(Gen_outputs[k], index2word)))
+
+print("----------------Evaluation on testing set: -----------------------")
+for i in range(5):
+    Gen_outputs, prob_log = GenForward(Gen_encoder,
+                                       Gen_decoder,
+                                       test_pairs[i][0],
+                                       if_beam_search=True,
+                                       beam_search_k=beam_search_k)
+    print("--------------------------------------------------------")
+    print("<Source>: {}\n<Target>: {}"
+      .format(index2sentence(test_pairs[i][0].squeeze().numpy(), index2word),
+              index2sentence(test_pairs[i][1].squeeze().numpy(), index2word)))
+    print("<Generated>: ")
+    for k in range(beam_search_k):
+        print("<Prob>: {}, <Sentence>: {}".format(math.exp(prob_log[k]),
+                                                  index2sentence(Gen_outputs[k], index2word)))
+
+
+#################################################################################
+
+
 # # generate negative data
 # with open("./data/generated_dialogue.txt", 'a', encoding='utf-8') as f:
-#     for i in range(1000):
+#     for i in range(100):
 #         s = ''
 #         x, _ = tensorFromPair(random.choice(TrainSet),to_device=False)
 #         generated = GenForward(Gen_encoder, Gen_decoder, x)
@@ -769,50 +910,50 @@ def REINFORCE_TRAINING(ModelGEncoder,
 
 ########### REINFORCE training ###########
 
-Gen_encoder = EncoderG().to(device)
-Gen_decoder = DecoderG().to(device)
-
-try:
-    Gen_encoder.load_state_dict(torch.load("./ModelParams/Gen_encoder_params.pkl"))
-    Gen_decoder.load_state_dict(torch.load("./ModelParams/Gen_decoder_params.pkl"))
-    print("Generator Model parameters loaded successfully.")
-except FileNotFoundError:
-    print("Generator Model parameters loading failed.")
-
-
-Discriminator = hierEncoder().to(device)
-
-try:
-    Discriminator.load_state_dict(torch.load("./ModelParams/Disc_params.pkl"))
-    print("Discriminator Model parameters loaded successfully.")
-except FileNotFoundError:
-    print("Discriminator Model parameters loading failed.")
-
-
-Interrupt_Flag = False
-print("Start training...(You can stop training by enter 'Ctrl + C')")
-for epoch in range(1000):
-    if Interrupt_Flag:
-        print("Stop training...")
-        break
-    else:
-        try:
-            REINFORCE_TRAINING(Gen_encoder, Gen_decoder, Discriminator, G_steps=2)
-        except KeyboardInterrupt:
-            Interrupt_Flag = True
-
-try:
-    torch.save(Gen_encoder.state_dict(), "./ModelParams/Gen_encoder_params.pkl")
-    torch.save(Gen_decoder.state_dict(), "./ModelParams/Gen_decoder_params.pkl")
-    print("Generator Model parameters saved successfully.")
-except:
-    print("Failed to save Generator model parameters.")
-
-try:
-    torch.save(Discriminator.state_dict(), "./ModelParams/Disc_params.pkl")
-    print("Discriminator Model parameters saved successfully.")
-except:
-    print("Failed to save Discriminator model parameters.")
+# Gen_encoder = EncoderG().to(device)
+# Gen_decoder = DecoderG().to(device)
+#
+# try:
+#     Gen_encoder.load_state_dict(torch.load("./ModelParams/Gen_encoder_params.pkl"))
+#     Gen_decoder.load_state_dict(torch.load("./ModelParams/Gen_decoder_params.pkl"))
+#     print("Generator Model parameters loaded successfully.")
+# except FileNotFoundError:
+#     print("Generator Model parameters loading failed.")
+#
+#
+# Discriminator = hierEncoder().to(device)
+#
+# try:
+#     Discriminator.load_state_dict(torch.load("./ModelParams/Disc_params.pkl"))
+#     print("Discriminator Model parameters loaded successfully.")
+# except FileNotFoundError:
+#     print("Discriminator Model parameters loading failed.")
+#
+#
+# Interrupt_Flag = False
+# print("Start training...(You can stop training by enter 'Ctrl + C')")
+# for epoch in range(1000):
+#     if Interrupt_Flag:
+#         print("Stop training...")
+#         break
+#     else:
+#         try:
+#             REINFORCE_TRAINING(Gen_encoder, Gen_decoder, Discriminator, G_steps=2)
+#         except KeyboardInterrupt:
+#             Interrupt_Flag = True
+#
+# try:
+#     torch.save(Gen_encoder.state_dict(), "./ModelParams/Gen_encoder_params.pkl")
+#     torch.save(Gen_decoder.state_dict(), "./ModelParams/Gen_decoder_params.pkl")
+#     print("Generator Model parameters saved successfully.")
+# except:
+#     print("Failed to save Generator model parameters.")
+#
+# try:
+#     torch.save(Discriminator.state_dict(), "./ModelParams/Disc_params.pkl")
+#     print("Discriminator Model parameters saved successfully.")
+# except:
+#     print("Failed to save Discriminator model parameters.")
 
 
 
