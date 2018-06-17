@@ -126,7 +126,8 @@ def PrepareData(set1_dir=None, set2_dir=None,
 
 TrainSet, TestSet, index2word = PrepareData(set1_dir=TrainSetDir,
                                             set2_dir=TestSetDir,
-                                            dic_dir=DicDir)
+                                            dic_dir=DicDir,
+                                            if_filter=True)
 GenSet, _, _ = PrepareData(set1_dir=GenSetDir, if_filter=False)
 
 #########################################################################
@@ -446,7 +447,14 @@ def pretrainG(encoder, decoder, batch_size=128, max_length=MaxLength, learning_r
                    decoder_input, decoder_hidden, encoder_outputs)
                decoder_input = target_tensor[di]
 
-               loss += criterion(decoder_output, target_tensor[di])
+                # 减小生成重复序列的概率
+               topv, topi = decoder_output.topk(1)
+               if di >0:
+                   loss += criterion(decoder_output, target_tensor[di]) + torch.exp(decoder_output[0][prev_max])
+               else:
+                   loss += criterion(decoder_output, target_tensor[di])
+               prev_max = topi.squeeze().item() # 记录前一次输出的分布中概率最大的单词
+
         else:
             # Without teacher forcing: use its own predictions as the next input
             for di in range(target_length):
@@ -455,7 +463,11 @@ def pretrainG(encoder, decoder, batch_size=128, max_length=MaxLength, learning_r
                 topv, topi = decoder_output.topk(1)
                 decoder_input = topi.squeeze().detach()  # detach from history as input
 
-                loss += criterion(decoder_output, target_tensor[di])
+                if di > 0:
+                    loss += criterion(decoder_output, target_tensor[di]) + torch.exp(decoder_output[0][prev_max])
+                else:
+                    loss += criterion(decoder_output, target_tensor[di])
+                    prev_max = topi.squeeze().item()  # 记录前一次输出的分布中概率最大的单词
 
                 if decoder_input.item() == EOS_Token:
                     break
@@ -583,59 +595,59 @@ def pretrainD(modelD, learning_rate=0.01, batch_size=128, to_device=True):
 #################################################################################
 
 ################### Test Generator (with beam search) ###########################
-Gen_encoder = EncoderG()
-Gen_decoder = DecoderG()
-
-try:
-    Gen_encoder.load_state_dict(torch.load("./ModelParams/Gen_encoder_params.pkl"))
-    Gen_decoder.load_state_dict(torch.load("./ModelParams/Gen_decoder_params.pkl"))
-    print("Model parameters loaded successfully.")
-except FileNotFoundError:
-    print("Model parameters loading failed.")
-
-train_pairs = [tensorFromPair(random.choice(TrainSet),to_device=False) for i in range(5)]
-test_pairs = [tensorFromPair(random.choice(TestSet),to_device=False) for i in range(5)]
-beam_search_k = 2
-
-print("----------------Evaluation on training set: --------------------- ")
-for i in range(5):
-    Gen_outputs, prob_log = GenForward(Gen_encoder,
-                                       Gen_decoder,
-                                       train_pairs[i][0],
-                                       if_beam_search=True,
-                                       beam_search_k=beam_search_k)
-
-    print("--------------------------------------------------------")
-    print("<Source>: {}\n<Target>: {}"
-      .format(index2sentence(train_pairs[i][0].squeeze().numpy(), index2word),
-              index2sentence(train_pairs[i][1].squeeze().numpy(), index2word)))
-    print("<Generated>: ")
-    for k in range(beam_search_k):
-        print("<Prob>: {}, <Sentence>: {}".format(math.exp(prob_log[k]),
-                                                  index2sentence(Gen_outputs[k], index2word)))
-
-print("----------------Evaluation on testing set: -----------------------")
-for i in range(5):
-    Gen_outputs, prob_log = GenForward(Gen_encoder,
-                                       Gen_decoder,
-                                       test_pairs[i][0],
-                                       if_beam_search=True,
-                                       beam_search_k=beam_search_k)
-    print("--------------------------------------------------------")
-    print("<Source>: {}\n<Target>: {}"
-      .format(index2sentence(test_pairs[i][0].squeeze().numpy(), index2word),
-              index2sentence(test_pairs[i][1].squeeze().numpy(), index2word)))
-    print("<Generated>: ")
-    for k in range(beam_search_k):
-        print("<Prob>: {}, <Sentence>: {}".format(math.exp(prob_log[k]),
-                                                  index2sentence(Gen_outputs[k], index2word)))
+# Gen_encoder = EncoderG()
+# Gen_decoder = DecoderG()
+#
+# try:
+#     Gen_encoder.load_state_dict(torch.load("./ModelParams/Gen_encoder_params.pkl"))
+#     Gen_decoder.load_state_dict(torch.load("./ModelParams/Gen_decoder_params.pkl"))
+#     print("Model parameters loaded successfully.")
+# except FileNotFoundError:
+#     print("Model parameters loading failed.")
+#
+# train_pairs = [tensorFromPair(random.choice(TrainSet),to_device=False) for i in range(5)]
+# test_pairs = [tensorFromPair(random.choice(TestSet),to_device=False) for i in range(5)]
+# beam_search_k = 2
+#
+# print("----------------Evaluation on training set: --------------------- ")
+# for i in range(5):
+#     Gen_outputs, prob_log = GenForward(Gen_encoder,
+#                                        Gen_decoder,
+#                                        train_pairs[i][0],
+#                                        if_beam_search=True,
+#                                        beam_search_k=beam_search_k)
+#
+#     print("--------------------------------------------------------")
+#     print("<Source>: {}\n<Target>: {}"
+#       .format(index2sentence(train_pairs[i][0].squeeze().numpy(), index2word),
+#               index2sentence(train_pairs[i][1].squeeze().numpy(), index2word)))
+#     print("<Generated>: ")
+#     for k in range(beam_search_k):
+#         print("<Prob>: {}, <Sentence>: {}".format(math.exp(prob_log[k]),
+#                                                   index2sentence(Gen_outputs[k], index2word)))
+#
+# print("----------------Evaluation on testing set: -----------------------")
+# for i in range(5):
+#     Gen_outputs, prob_log = GenForward(Gen_encoder,
+#                                        Gen_decoder,
+#                                        test_pairs[i][0],
+#                                        if_beam_search=True,
+#                                        beam_search_k=beam_search_k)
+#     print("--------------------------------------------------------")
+#     print("<Source>: {}\n<Target>: {}"
+#       .format(index2sentence(test_pairs[i][0].squeeze().numpy(), index2word),
+#               index2sentence(test_pairs[i][1].squeeze().numpy(), index2word)))
+#     print("<Generated>: ")
+#     for k in range(beam_search_k):
+#         print("<Prob>: {}, <Sentence>: {}".format(math.exp(prob_log[k]),
+#                                                   index2sentence(Gen_outputs[k], index2word)))
 
 
 #################################################################################
 
 
-# # generate negative data
-# with open("./data/generated_dialogue.txt", 'a', encoding='utf-8') as f:
+################### generate negative data ########################################################
+# with open("./data/generated_dialogue.txt", 'w', encoding='utf-8') as f:
 #     for i in range(100):
 #         s = ''
 #         x, _ = tensorFromPair(random.choice(TrainSet),to_device=False)
@@ -729,7 +741,7 @@ def REINFORCE_TRAINING(ModelGEncoder,
                        learning_rate=0.01,
                        if_use_MC=False,
                        if_use_critic=False,
-                       teacher_forcing_rate=0.5,
+                       teacher_forcing_ratio=0.5,
                        max_length=MaxLength):
 
     '''num_iter: 训练迭代次数
@@ -747,7 +759,7 @@ def REINFORCE_TRAINING(ModelGEncoder,
     for iter in range(num_iter):
 
         ############## Train Discriminator ##############
-        print("Train Discriminator...")
+        print("-------- < Train Discriminator... > --------")
         total_loss = 0
         start_time = time.time()
         for di in range(D_steps):
@@ -776,13 +788,17 @@ def REINFORCE_TRAINING(ModelGEncoder,
                 DiscOptimizer.step()
                 total_loss += loss
 
-        print("     Time Consumed: <{}>     Batch Loss: <{:.4f}> ".format(asMinutes(time.time() - start_time),
+        print("Time Consumed: <{}>\nBatch Loss: <{:.4f}> ".format(asMinutes(time.time() - start_time),
                                                                total_loss.item()/D_steps))
 
         ################ Train Generator ###############
-        print("Train Generator...")
-        total_loss = 0
+        print("-------- < Train Generator... > --------")
+        Total_NLLLoss = 0
+        Total_Expected_Reward = 0
+        teacher_forcing_training_count = 0   # 用来计算平均NLLLoss
+        reinforce_count = 0   # 用来计算平均reward
         start_time = time.time()
+
         for gi in range(G_steps):
 
             rewards = []
@@ -794,17 +810,19 @@ def REINFORCE_TRAINING(ModelGEncoder,
                 gen_y = torch.tensor(gen_y, dtype=torch.long).view(-1, 1).to(device)
                 gen_pair = [real_pair[0], gen_y]
 
-                loss = 0      # 单个样本的loss
-
                 # Compute reward r for {(x, y_hat)} using D
                 reward = torch.exp(ModelD(gen_pair, to_device=True)).squeeze()[0].item()
                 rewards.append(reward)
 
                 # Update G
-                use_teacher_forcing = True if random.random() < teacher_forcing_rate else False
+                use_teacher_forcing = True if random.random() < teacher_forcing_ratio else False
 
                 # 采用teacher_forcing
+                nllloss = 0  # 单个样本(一句话)的loss
                 if use_teacher_forcing:
+
+                    teacher_forcing_training_count += 1
+
                     GenEncoderOptimizer = optim.SGD(ModelGEncoder.parameters(), lr=learning_rate, momentum=0.8)
                     GenDecoderOptimizer = optim.SGD(ModelGDecoder.parameters(), lr=learning_rate, momentum=0.8)
 
@@ -832,27 +850,39 @@ def REINFORCE_TRAINING(ModelGEncoder,
                     for di in range(target_length):
                         decoder_output, decoder_hidden, decoder_attention = ModelGDecoder(
                             decoder_input, decoder_hidden, encoder_outputs)
-                        topv, topi = decoder_output.topk(1)
-                        decoder_input = topi.squeeze().detach()  # detach from history as input
 
-                        loss += CriterionNLLLoss(decoder_output, target_tensor[di])
+                        decoder_input = target_tensor[di]  # detach from history as input
+
+                        # 减小生成重复序列的概率
+                        topv, topi = decoder_output.topk(1)
+                        if di > 0:
+                            nllloss += CriterionNLLLoss(decoder_output, target_tensor[di]) + torch.exp(
+                                decoder_output[0][prev_max])
+                        else:
+                            nllloss += CriterionNLLLoss(decoder_output, target_tensor[di])
+                        prev_max = topi.squeeze().item()  # 记录前一次输出的分布中概率最大的单词
 
                         if decoder_input.item() == EOS_Token:
                             break
 
                     ## BPTT & Parameters updating (every sentence)##
-                    total_loss += loss
-                    loss.backward()
+                    Total_NLLLoss += nllloss
+                    nllloss.backward()
                     GenEncoderOptimizer.step()
                     GenDecoderOptimizer.step()
 
                 # REINFORCE
                 else:
+                    reinforce_count += 1
+                    probability = 0  # 生成一句话的log概率
+                    expected_reward = 0  # 一句话的期望reward
+
                     if if_use_critic:
                         # 训练critic并使用critic计算baseline
                         pass
 
                     else:
+
                         # 使用reward平均值作为baseline
                         baseline = sum(rewards)/len(rewards)
 
@@ -863,8 +893,8 @@ def REINFORCE_TRAINING(ModelGEncoder,
                         else:
                             as_lr = learning_rate * reward
 
-                        GenEncoderOptimizer = optim.SGD(ModelGEncoder.parameters(), lr=as_lr, momentum=0.3)
-                        GenDecoderOptimizer = optim.SGD(ModelGDecoder.parameters(), lr=as_lr, momentum=0.3)
+                        GenEncoderOptimizer = optim.SGD(ModelGEncoder.parameters(), lr=as_lr, momentum=0.8)
+                        GenDecoderOptimizer = optim.SGD(ModelGDecoder.parameters(), lr=as_lr, momentum=0.8)
 
                         GenEncoderOptimizer.zero_grad()
                         GenDecoderOptimizer.zero_grad()
@@ -888,72 +918,78 @@ def REINFORCE_TRAINING(ModelGEncoder,
                             topv, topi = decoder_output.topk(1)
                             decoder_input = topi.squeeze().detach()  # detach from history as input
 
-                            # 计算生成 {y_hat} 的概率
-                            loss += topv.squeeze()
+                            # 计算生成 {y_hat} 的log概率
+                            probability += topv.squeeze()
 
                             if decoder_input.item() == EOS_Token:
                                 break
 
-                        # 由于REINFORCE的目标是最大化期望的reward，所以将loss取反
-                        total_loss += loss
-                        loss = -loss
+
+                        # 计算单句话的期望reward
+                        expected_reward += reward * torch.exp(probability).squeeze().item()
+                        # 计算总的期望reward
+                        Total_Expected_Reward += expected_reward
+                        # 由于REINFORCE的目标是最大化期望的reward，所以将log(p)取反
+                        probability = -probability
 
                         # back propagation & update params
-                        loss.backward()
+                        probability.backward()
                         GenEncoderOptimizer.step()
                         GenDecoderOptimizer.step()
 
-        print("     Time Consumed: <{}>     Negative Average Loss: <{:.2f}> ".format(asMinutes(time.time() - start_time),
-                                                               total_loss.item() / batch_size / G_steps))
+        print("Time Consumed: <{}>\nAverage NLLLoss : <{:.2f}>\nExpected Reward Approximation: <{:.2f}> "
+              .format(asMinutes(time.time() - start_time),
+                      Total_NLLLoss.squeeze().item() / teacher_forcing_training_count,
+                      Total_Expected_Reward / reinforce_count))
         print("-----------------------------------------------------------------------------------")
 
 
 ########### REINFORCE training ###########
 
-# Gen_encoder = EncoderG().to(device)
-# Gen_decoder = DecoderG().to(device)
-#
-# try:
-#     Gen_encoder.load_state_dict(torch.load("./ModelParams/Gen_encoder_params.pkl"))
-#     Gen_decoder.load_state_dict(torch.load("./ModelParams/Gen_decoder_params.pkl"))
-#     print("Generator Model parameters loaded successfully.")
-# except FileNotFoundError:
-#     print("Generator Model parameters loading failed.")
-#
-#
-# Discriminator = hierEncoder().to(device)
-#
-# try:
-#     Discriminator.load_state_dict(torch.load("./ModelParams/Disc_params.pkl"))
-#     print("Discriminator Model parameters loaded successfully.")
-# except FileNotFoundError:
-#     print("Discriminator Model parameters loading failed.")
-#
-#
-# Interrupt_Flag = False
-# print("Start training...(You can stop training by enter 'Ctrl + C')")
-# for epoch in range(1000):
-#     if Interrupt_Flag:
-#         print("Stop training...")
-#         break
-#     else:
-#         try:
-#             REINFORCE_TRAINING(Gen_encoder, Gen_decoder, Discriminator, G_steps=2)
-#         except KeyboardInterrupt:
-#             Interrupt_Flag = True
-#
-# try:
-#     torch.save(Gen_encoder.state_dict(), "./ModelParams/Gen_encoder_params.pkl")
-#     torch.save(Gen_decoder.state_dict(), "./ModelParams/Gen_decoder_params.pkl")
-#     print("Generator Model parameters saved successfully.")
-# except:
-#     print("Failed to save Generator model parameters.")
-#
-# try:
-#     torch.save(Discriminator.state_dict(), "./ModelParams/Disc_params.pkl")
-#     print("Discriminator Model parameters saved successfully.")
-# except:
-#     print("Failed to save Discriminator model parameters.")
+Gen_encoder = EncoderG().to(device)
+Gen_decoder = DecoderG().to(device)
+
+try:
+    Gen_encoder.load_state_dict(torch.load("./ModelParams/Gen_encoder_params.pkl"))
+    Gen_decoder.load_state_dict(torch.load("./ModelParams/Gen_decoder_params.pkl"))
+    print("Generator Model parameters loaded successfully.")
+except FileNotFoundError:
+    print("Generator Model parameters loading failed.")
+
+
+Discriminator = hierEncoder().to(device)
+
+try:
+    Discriminator.load_state_dict(torch.load("./ModelParams/Disc_params.pkl"))
+    print("Discriminator Model parameters loaded successfully.")
+except FileNotFoundError:
+    print("Discriminator Model parameters loading failed.")
+
+
+Interrupt_Flag = False
+print("Start training...(You can stop training by enter 'Ctrl + C')")
+for epoch in range(1000):
+    if Interrupt_Flag:
+        print("Stop training...")
+        break
+    else:
+        try:
+            REINFORCE_TRAINING(Gen_encoder, Gen_decoder, Discriminator)
+        except KeyboardInterrupt:
+            Interrupt_Flag = True
+
+try:
+    torch.save(Gen_encoder.state_dict(), "./ModelParams/Gen_encoder_params.pkl")
+    torch.save(Gen_decoder.state_dict(), "./ModelParams/Gen_decoder_params.pkl")
+    print("Generator Model parameters saved successfully.")
+except:
+    print("Failed to save Generator model parameters.")
+
+try:
+    torch.save(Discriminator.state_dict(), "./ModelParams/Disc_params.pkl")
+    print("Discriminator Model parameters saved successfully.")
+except:
+    print("Failed to save Discriminator model parameters.")
 
 
 
