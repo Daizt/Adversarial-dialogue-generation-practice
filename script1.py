@@ -337,7 +337,7 @@ class hierEncoder(nn.Module):
         self.gru1 = nn.GRU(self.embedding_size, self.embedding_size)
         self.gru2 = nn.GRU(self.embedding_size, self.embedding_size)
         self.linear1 = nn.Linear(self.embedding_size, 128)
-        self.linear2 = nn.Linear(128, 2)
+        self.linear2 = nn.Linear(128, 4)
 
     def forward(self, pair, to_device=False):
         # pair为对话 {x, y} 类型为torch.tensor()
@@ -811,7 +811,7 @@ def REINFORCE_TRAINING(ModelGEncoder,
                 gen_pair = [real_pair[0], gen_y]
 
                 # Compute reward r for {(x, y_hat)} using D
-                reward = torch.exp(ModelD(gen_pair, to_device=True)).squeeze()[0].item()
+                reward = torch.exp(ModelD(gen_pair, to_device=True)).squeeze()[0].tolist()
                 rewards.append(reward)
 
                 # Update G
@@ -887,14 +887,17 @@ def REINFORCE_TRAINING(ModelGEncoder,
                         baseline = sum(rewards)/len(rewards)
 
                         # 根据原公式采用REINFORCE算法计算梯度时（r - b）并不参与求导，只相当于改变了learning_rate
-                        if (reward - baseline) > 0:
-                            # as_lr = learning_rate * (reward - baseline)
-                            as_lr = learning_rate * (1 + reward)
-                        else:
-                            as_lr = learning_rate * reward
+                        # if (reward - baseline) > 0:
+                        #     # as_lr = learning_rate * (reward - baseline)
+                        #     as_lr = learning_rate * (1 + reward)
+                        # else:
+                        #     as_lr = learning_rate * reward
+                        #
+                        # GenEncoderOptimizer = optim.SGD(ModelGEncoder.parameters(), lr=as_lr, momentum=0.8)
+                        # GenDecoderOptimizer = optim.SGD(ModelGDecoder.parameters(), lr=as_lr, momentum=0.8)
 
-                        GenEncoderOptimizer = optim.SGD(ModelGEncoder.parameters(), lr=as_lr, momentum=0.8)
-                        GenDecoderOptimizer = optim.SGD(ModelGDecoder.parameters(), lr=as_lr, momentum=0.8)
+                        GenEncoderOptimizer = optim.SGD(ModelGEncoder.parameters(), lr=learning_rate, momentum=0.8)
+                        GenDecoderOptimizer = optim.SGD(ModelGDecoder.parameters(), lr=learning_rate, momentum=0.8)
 
                         GenEncoderOptimizer.zero_grad()
                         GenDecoderOptimizer.zero_grad()
@@ -930,7 +933,7 @@ def REINFORCE_TRAINING(ModelGEncoder,
                         # 计算总的期望reward
                         Total_Expected_Reward += expected_reward
                         # 由于REINFORCE的目标是最大化期望的reward，所以将log(p)取反
-                        probability = -probability
+                        probability = - probability * (reward - baseline)
 
                         # back propagation & update params
                         probability.backward()
