@@ -124,11 +124,11 @@ def PrepareData(set1_dir=None, set2_dir=None,
 
 ########################### 数据加载 #####################################
 
-TrainSet, TestSet, index2word = PrepareData(set1_dir=TrainSetDir,
+TrainSet, TestSet, index2word = PrepareData(set1_dir=TrimmedSetDir,
                                             set2_dir=TestSetDir,
                                             dic_dir=DicDir,
-                                            if_filter=True)
-GenSet, _, _ = PrepareData(set1_dir=GenSetDir, if_filter=False)
+                                            if_filter=False)
+GenSet, _, _ = PrepareData(set1_dir=GenSetDir, if_filter=True)
 
 #########################################################################
 
@@ -284,30 +284,47 @@ def GenForward(encoder_G,
                 else:
                     decoder_input = torch.tensor([decoder_outputs[k][-1]], dtype=torch.long)
 
-                decoder_hidden = hidden_log[k]
-                decoder_output, decoder_hidden, _ = decoder_G(decoder_input, decoder_hidden,
-                                                                            encoder_outputs)
-                # 初步比较
-                topv, topi = decoder_output.topk(beam_search_k)
+                if decoder_input.item() != EOS_Token:
+                    decoder_hidden = hidden_log[k]
+                    decoder_output, decoder_hidden, _ = decoder_G(decoder_input, decoder_hidden,
+                                                                                encoder_outputs)
+                    # 初步比较
+                    topv, topi = decoder_output.topk(beam_search_k)
+                    topv += prob_log[k]
 
-                temp_prob_log = torch.cat([temp_prob_log, topv], dim=1)
-                temp_hidden_log.append(decoder_hidden)
-                temp_output_log = torch.cat([temp_output_log, topi], dim=1)
+                    temp_prob_log = torch.cat([temp_prob_log, topv], dim=1)
+                    temp_hidden_log.append(decoder_hidden)
+                    temp_output_log = torch.cat([temp_output_log, topi], dim=1)
 
-            # 最终比较（在 k*K 个候选项中选出概率最大的 k 个选项）
+                else:  # 如果已达到 <EOS>
+                    if to_device:
+                        topv = torch.ones(1, beam_search_k).to(device) * prob_log[k]
+                        topi = torch.ones(1, beam_search_k).to(device) * EOS_Token
+                    else:
+                        topv = torch.ones(1, beam_search_k) * prob_log[k]
+                        topi = torch.ones(1, beam_search_k, dtype=torch.long) * EOS_Token
+
+                    temp_prob_log = torch.cat([temp_prob_log, topv], dim=1)
+                    temp_hidden_log.append(None)
+                    temp_output_log = torch.cat([temp_output_log, topi], dim=1)
+
+            # 最终比较（在 k*k 个候选项中选出概率最大的 k 个选项）
             temp_topv, temp_topi = temp_prob_log.topk(beam_search_k)
+
+            temp_decoder_outputs = decoder_outputs.copy()
 
             # 记录结果(保持概率降序排列)
             for k in range(beam_search_k):
                 ith = int(temp_topi.squeeze()[k].item()/beam_search_k)
+
                 hidden_log[k] = temp_hidden_log[ith]
 
-                prob_log[k] += temp_topv.squeeze()[k].detach().item()
+                prob_log[k] = temp_topv.squeeze()[k].item()
 
-                decoder_outputs[k].append(temp_output_log.squeeze()[temp_topi.squeeze()[k].item()].detach().item())
-
-            # <EOS>
-            pass
+                decoder_outputs[k] = temp_decoder_outputs[ith].copy()
+                if temp_output_log.squeeze()[temp_topi.squeeze()[k].item()].item() != EOS_Token \
+                        and decoder_outputs[k][-1] != EOS_Token:
+                    decoder_outputs[k].append(temp_output_log.squeeze()[temp_topi.squeeze()[k].item()].item())
 
         return decoder_outputs, prob_log
 
@@ -335,9 +352,9 @@ class hierEncoder(nn.Module):
 
         self.embedding = nn.Embedding(self.vocab_size, self.embedding_size)
         self.gru1 = nn.GRU(self.embedding_size, self.embedding_size)
-        self.gru2 = nn.GRU(self.embedding_size, self.embedding_size)
-        self.linear1 = nn.Linear(self.embedding_size, 128)
-        self.linear2 = nn.Linear(128, 4)
+        self.gru2 = nn.GRU(self.embedding_size, 128)
+        self.linear1 = nn.Linear(128, 32)
+        self.linear2 = nn.Linear(32, 2)
 
     def forward(self, pair, to_device=False):
         # pair为对话 {x, y} 类型为torch.tensor()
@@ -365,9 +382,9 @@ class hierEncoder(nn.Module):
         hidden_y = hidden     # y句的编码结果
 
         if to_device:
-            hidden = self.initHidden().to(device)
+            hidden = torch.zeros(1, 1, 128).to(device)
         else:
-            hidden = self.initHidden()
+            hidden = torch.zeros(1, 1, 128)
 
         _, hidden = self.gru2(hidden_x, hidden)
         _, hidden = self.gru2(hidden_y, hidden)
@@ -472,18 +489,18 @@ def pretrainG(encoder, decoder, batch_size=128, max_length=MaxLength, learning_r
                 if decoder_input.item() == EOS_Token:
                     break
 
-        ## BPTT & Parameters updating (every sentence)##
+        ## BPTT & Parameters updating (every sentence) ##
+        # total_loss += loss
+        # loss.backward()
+        # encoder_optimizer.step()
+        # decoder_optimizer.step()
+
+
+    ## BPTT & Parameters updating (every batch) ##
         total_loss += loss
-        loss.backward()
-        encoder_optimizer.step()
-        decoder_optimizer.step()
-
-
-    # ## BPTT & Parameters updating (every batch)##
-    #     total_loss += loss
-    # total_loss.backward()
-    # encoder_optimizer.step()
-    # decoder_optimizer.step()
+    total_loss.backward()
+    encoder_optimizer.step()
+    decoder_optimizer.step()
 
     print("Time consumed: {} Average loss: {:.2f} ".format(asMinutes(time.time()-start_time),
                                                           total_loss.item()/batch_size))
@@ -573,6 +590,8 @@ def pretrainD(modelD, learning_rate=0.01, batch_size=128, to_device=True):
 #     print("Model parameters loading failed.")
 #
 # train_pairs = [tensorFromPair(random.choice(TrainSet),to_device=False) for i in range(5)]
+# test_pairs = [tensorFromPair(random.choice(TestSet),to_device=False) for i in range(5)]
+#
 # print("----------------Evaluation on training set: --------------------- ")
 # for i in range(5):
 #     Gen_output = GenForward(Gen_encoder,Gen_decoder,train_pairs[i][0])
@@ -582,7 +601,7 @@ def pretrainD(modelD, learning_rate=0.01, batch_size=128, to_device=True):
 #               index2sentence(train_pairs[i][1].squeeze().numpy(), index2word),
 #               index2sentence(Gen_output, index2word)))
 #
-# test_pairs = [tensorFromPair(random.choice(TestSet),to_device=False) for i in range(5)]
+#
 # print("----------------Evaluation on testing set: -----------------------")
 # for i in range(5):
 #     Gen_output = GenForward(Gen_encoder,Gen_decoder,test_pairs[i][0])
@@ -607,7 +626,7 @@ def pretrainD(modelD, learning_rate=0.01, batch_size=128, to_device=True):
 #
 # train_pairs = [tensorFromPair(random.choice(TrainSet),to_device=False) for i in range(5)]
 # test_pairs = [tensorFromPair(random.choice(TestSet),to_device=False) for i in range(5)]
-# beam_search_k = 2
+# beam_search_k = 3
 #
 # print("----------------Evaluation on training set: --------------------- ")
 # for i in range(5):
@@ -738,7 +757,7 @@ def REINFORCE_TRAINING(ModelGEncoder,
                        D_steps=5,
                        G_steps=1,
                        batch_size=128,
-                       learning_rate=0.01,
+                       learning_rate=0.001,
                        if_use_MC=False,
                        if_use_critic=False,
                        teacher_forcing_ratio=0.5,
@@ -933,7 +952,12 @@ def REINFORCE_TRAINING(ModelGEncoder,
                         # 计算总的期望reward
                         Total_Expected_Reward += expected_reward
                         # 由于REINFORCE的目标是最大化期望的reward，所以将log(p)取反
-                        probability = - probability * (reward - baseline)
+
+                        #probability = - probability * (reward - baseline)
+                        if reward > baseline:
+                            probability = -probability * (1+reward)
+                        else:
+                            probability = -probability * (reward - baseline)
 
                         # back propagation & update params
                         probability.backward()
