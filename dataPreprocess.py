@@ -7,11 +7,6 @@ This script handles loading and preprocessing of "Cornell Movie-Dialogs Corpus" 
 3. Save conversation pairs as a new file(formatted_movie_lines.txt).
 '''
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
-
 import csv
 import re
 import os

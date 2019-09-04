@@ -3,10 +3,6 @@ This script creates a dictionary according to conversations, then trims infreque
 as sentences that are too long or too short, finally save the trimmed conversation pairs and word-index 
 dict as new files for further use.
 '''
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
 
 import re
 import os
